@@ -84,10 +84,13 @@ MAX_WEIGHT_OVERRIDE = 1000.0
 # multiplied by this factor while that is the case.
 BIG_CONTEXT_MARGIN_FACTOR = 2.0
 
-# How far back to look for "a session currently carrying a large context".
-# Ten minutes is twice the Anthropic API's default five-minute prompt-cache
-# lifetime, so a session that paused briefly still counts as warm.
-BIG_CONTEXT_LOOKBACK_S = 600.0
+# How far back to look for "a session currently carrying a large context":
+# one hour, the lifetime of the cache entries Claude Code writes. Measured on
+# Claude Code 2.1.331: a `claude -p` reply's usage reports its cache writes
+# under `cache_creation.ephemeral_1h_input_tokens`, none under the 5-minute
+# kind. So a conversation paused for up to an hour is still warm, and a move
+# would still cost its cache.
+BIG_CONTEXT_LOOKBACK_S = 3600.0
 
 # Scores are tiny fractions (quota per hour). Multiplying by this for display
 # turns 0.0417 into 41.7, which is easier to compare at a glance.
