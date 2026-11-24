@@ -169,21 +169,24 @@ def test_requests_are_credited_to_the_account_active_at_the_time(env):
     assert set(ledger.totals(0)) == {"1", "2"}
 
 
-def test_model_last_seen_and_peak_context(env):
+def test_model_last_seen_and_warm_context(env):
     backup, config, project = env
     now = time.time()
     _write(project / "a.jsonl", [_user(now - 30), _reply(now - 29, "m1", inp=500, model="claude-fable-5-2")])
     _write(project / "b.jsonl", [_user(now - 20), _reply(now - 19, "m2", inp=100)])
+    _write(project / "c.jsonl", [_user(now - 7200), _reply(now - 7199, "m3", inp=9999)])  # expired
     ledger = _ledger(backup, config)
     assert ledger.model_last_seen("Fable") == pytest.approx(now - 29, abs=1)
     assert ledger.model_last_seen("Haiku") is None
-    assert ledger.recent_peak_context(600) == 500
+    # Latest request per warm session, summed: 500 + 100 (+5 output is not context).
+    assert ledger.warm_context(3600) == (600, 2)
+    assert ledger.warm_context(10) == (0, 0)
 
 
 def test_missing_projects_dir_is_harmless(tmp_path):
     ledger = tokens.Ledger(tmp_path, config_dir=tmp_path / "nothing")
     ledger.refresh(force=True)
-    assert ledger.prompts() == [] and ledger.seconds_since_write() is None
+    assert ledger.prompts() == [] and ledger.warm_context(3600) == (0, 0)
 
 
 @pytest.mark.parametrize("n, text", [(812, "812"), (45_200, "45.2k"), (1_234_567, "1.2M")])

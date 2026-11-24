@@ -1505,6 +1505,7 @@ class TestAutoScreen:
             assert "Balance (score" in text
             assert "score" in text and "w1" in text
             assert "Tokens (this computer)" in text
+            assert "warm cache" in text and "budget" in text
 
     async def test_go_live_requires_confirmation(self, tmp_path, fake_engine):
         fake = FakeSwitcher(

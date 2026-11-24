@@ -78,20 +78,6 @@ MIN_HOURS_TO_RESET = 0.5
 # one account forever.
 MAX_WEIGHT_OVERRIDE = 1000.0
 
-# While Claude Code is carrying a large conversation, a move costs more,
-# because the new account starts with a cold prompt cache and the whole
-# context is sent again at full price. The margin a candidate must beat is
-# multiplied by this factor while that is the case.
-BIG_CONTEXT_MARGIN_FACTOR = 2.0
-
-# How far back to look for "a session currently carrying a large context":
-# one hour, the lifetime of the cache entries Claude Code writes. Measured on
-# Claude Code 2.1.331: a `claude -p` reply's usage reports its cache writes
-# under `cache_creation.ephemeral_1h_input_tokens`, none under the 5-minute
-# kind. So a conversation paused for up to an hour is still warm, and a move
-# would still cost its cache.
-BIG_CONTEXT_LOOKBACK_S = 3600.0
-
 # Scores are tiny fractions (quota per hour). Multiplying by this for display
 # turns 0.0417 into 41.7, which is easier to compare at a glance.
 DISPLAY_SCALE = 1000.0
@@ -220,26 +206,15 @@ def spare_rate(
     return tightest
 
 
-def margin_factor(recent_peak_context: int, big_context: float) -> float:
-    """Return the multiplier for the balance margin right now.
 
-    It is :data:`BIG_CONTEXT_MARGIN_FACTOR` while a recent Claude Code request
-    carried at least ``big_context`` tokens, and ``1.0`` otherwise.
-    ``big_context`` of 0 turns the doubling off.
-    """
-    if big_context > 0 and recent_peak_context >= big_context:
-        return BIG_CONTEXT_MARGIN_FACTOR
-    return 1.0
-
-
-def required_score(active_score: float, margin_pct: float, factor: float) -> float:
+def required_score(active_score: float, margin_pct: float) -> float:
     """Return the score a candidate must reach to take over from the active account.
 
     With a 25% margin and an active score of 40, a candidate needs 50. The
     margin is what keeps two nearly equal accounts from swapping back and
     forth on every tick.
     """
-    return active_score * (1.0 + margin_pct * factor / 100.0)
+    return active_score * (1.0 + margin_pct / 100.0)
 
 
 def fmt(score: float | None) -> str:

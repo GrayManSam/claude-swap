@@ -202,9 +202,6 @@ class Ledger:
         self._prompts: dict[str, list] = {}
         # (ts, from slot, to slot) for every switch in claude-swap.log, oldest first.
         self._switches: list[tuple[float, str, str]] = []
-        # mtime of the most recently written transcript, for "is a reply
-        # being written right now?".
-        self._newest_write_ts = 0.0
 
         self._load_cache()
 
@@ -289,7 +286,6 @@ class Ledger:
 
         changed = False
         paths_seen: set[str] = set()
-        newest_mtime = 0.0
 
         for path in self.projects_dir.rglob("*.jsonl"):
             try:
@@ -298,7 +294,6 @@ class Ledger:
                 continue  # deleted between listing and stat
             if stat.st_mtime < cutoff:
                 continue  # untouched for longer than we keep history
-            newest_mtime = max(newest_mtime, stat.st_mtime)
 
             key = str(path)
             paths_seen.add(key)
@@ -316,8 +311,6 @@ class Ledger:
                 continue  # nothing new
             self._scan_file(path, info)
             changed = True
-
-        self._newest_write_ts = newest_mtime
 
         # Forget files that were deleted or have aged out.
         for gone in set(self._files) - paths_seen:
@@ -488,16 +481,6 @@ class Ledger:
             account = to_slot
         return account
 
-    def seconds_since_write(self, now: float | None = None) -> float | None:
-        """Seconds since any transcript was last written, or None if none seen.
-
-        Claude Code appends to the transcript as a reply streams in, so a
-        small number here means a reply is probably being written right now.
-        """
-        if not self._newest_write_ts:
-            return None
-        return max(0.0, (now or time.time()) - self._newest_write_ts)
-
     def model_last_seen(self, name: str) -> float | None:
         """When was a model whose id contains ``name`` last used?
 
@@ -512,12 +495,19 @@ class Ledger:
                     latest = request.ts
         return latest
 
-    def recent_peak_context(self, within_s: float, now: float | None = None) -> int:
-        """Largest current context among sessions active in the last ``within_s``.
+    def warm_context(self, within_s: float, now: float | None = None) -> tuple[int, int]:
+        """How much prompt cache a move would throw away right now.
 
-        For each session with a request in that span, take its *latest*
-        request's size (that is how big the conversation is now, not how big
-        it once was), then return the largest of those. 0 if none.
+        Returns ``(tokens, conversations)``: for every session with a request
+        in the last ``within_s`` seconds, the size of its *latest* request
+        (the context its cache currently holds), summed, and how many such
+        sessions there are. Prompt caches belong to an account, so switching
+        the login discards all of these, and each conversation's next request
+        writes its whole context again on the new account.
+
+        Subagent requests are filed under their parent session, so a session
+        whose latest request came from a subagent counts that subagent's
+        context. This is an approximation that undercounts slightly.
         """
         since = (now or time.time()) - within_s
         latest_by_session: dict[str, _Request] = {}
@@ -527,7 +517,7 @@ class Ledger:
             previous = latest_by_session.get(request.session)
             if previous is None or request.ts > previous.ts:
                 latest_by_session[request.session] = request
-        return max((r.sent for r in latest_by_session.values()), default=0)
+        return sum(r.sent for r in latest_by_session.values()), len(latest_by_session)
 
     def prompts(self, since: float = 0.0, current: str | None = None) -> list[Prompt]:
         """Every prompt with a request at or after ``since``, oldest first.

@@ -482,15 +482,8 @@ class AutoScreen(Screen):
             style=palette.muted,
         )
         if active_score is not None:
-            ledger = tokens.ledger_for(self.app.switcher.backup_dir)
-            factor = balance.margin_factor(
-                ledger.recent_peak_context(balance.BIG_CONTEXT_LOOKBACK_S),
-                settings.balance_big_context,
-            )
-            need = balance.required_score(active_score, settings.balance_margin, factor)
+            need = balance.required_score(active_score, settings.balance_margin)
             text.append(f"  moves at >= {balance.fmt(need)}", style=palette.muted)
-            if factor > 1:
-                text.append(f" (x{factor:g} margin: large context)", style=palette.muted)
         for _sort_key, _slot, row in sorted(rows):
             text.append(row)
         if model_note:
@@ -568,8 +561,8 @@ class AutoScreen(Screen):
         * totals per account for the last hour and since local midnight;
         * the last three prompts in the past three hours (time, account,
           model, API calls, tokens sent and received, peak context);
-        * a note when a reply is being written right now, since balance
-          moves wait for it (``autoswitch.balanceIdleSeconds``).
+        * the warm prompt cache a balance move would discard right now,
+          against ``autoswitch.balanceMoveBudget``.
         """
         ledger = tokens.ledger_for(self.app.switcher.backup_dir)
         ledger.refresh_async()
@@ -607,12 +600,12 @@ class AutoScreen(Screen):
                     style=palette.foreground,
                 )
 
-        quiet_for = ledger.seconds_since_write(now)
-        reply_in_progress = (
-            quiet_for is not None
-            and settings.balance_idle_seconds > 0
-            and quiet_for < settings.balance_idle_seconds
+        warm_tokens, warm_count = ledger.warm_context(settings.balance_warm_seconds, now)
+        budget = settings.balance_move_budget
+        verdict = "balance moves wait" if warm_tokens > budget else "a balance move is cheap now"
+        text.append(
+            f"\n warm cache {tokens.human(warm_tokens)} in {warm_count} conversation(s)"
+            f" / budget {tokens.human(budget)}: {verdict}",
+            style=palette.muted,
         )
-        if reply_in_progress:
-            text.append("\n reply in progress: balance moves wait", style=palette.muted)
         return text

@@ -87,14 +87,15 @@ class AutoSwitchSettings:
     # Per-slot plan weight overrides, "slot=weight,..." (e.g. "1=5,2=1").
     # None means use the weight of each account's plan.
     balance_weights: str | None = None
-    # Hold a balance move until Claude Code's transcripts have been quiet this
-    # many seconds, so a reply is not split across two accounts' prompt
-    # caches. 0 turns the wait off.
-    balance_idle_seconds: float = 90.0
-    # While an open conversation is at least this many tokens, multiply the
-    # margin by balance.BIG_CONTEXT_MARGIN_FACTOR. A move re-sends the whole
-    # context uncached, so a big context makes moving costlier. 0 turns it off.
-    balance_big_context: float = 400000.0
+    # A conversation used within this many seconds still has a warm prompt
+    # cache on the active account. Claude Code writes one-hour cache entries
+    # (measured on 2.1.331: `cache_creation.ephemeral_1h_input_tokens`), so
+    # the default is an hour.
+    balance_warm_seconds: float = 3600.0
+    # An optional balance move happens only while the warm context it would
+    # throw away (tokens.Ledger.warm_context) is at most this many tokens.
+    # 0 means only when no conversation is warm.
+    balance_move_budget: float = 50000.0
 
     # -- model control (modelctl.py); off unless model_control is True --------
     # Count a per-model window only while that model is in use, and set
@@ -250,12 +251,12 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             help="balance strategy: plan weight overrides by slot, e.g. 1=5,2=1",
         ),
         SettingSpec(
-            "autoswitch", "balanceIdleSeconds", "balance_idle_seconds", "float", 0.0, 3600.0,
-            help="balance: hold a move until Claude Code logs are quiet this long (0=off)",
+            "autoswitch", "balanceWarmSeconds", "balance_warm_seconds", "float", 0.0, 86400.0,
+            help="balance: a conversation used this recently still has a warm cache (default 3600)",
         ),
         SettingSpec(
-            "autoswitch", "balanceBigContext", "balance_big_context", "float", 0.0, 10000000.0,
-            help="balance: double the margin while a session context is this many tokens (0=off)",
+            "autoswitch", "balanceMoveBudget", "balance_move_budget", "float", 0.0, 100000000.0,
+            help="balance: move only while warm cache to lose is at most this many tokens",
         ),
         SettingSpec(
             "autoswitch", "modelControl", "model_control", "bool",

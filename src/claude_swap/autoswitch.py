@@ -1466,11 +1466,6 @@ class AutoSwitchEngine:
                     return unbarred
             return ranked
 
-        # A balance move costs the prompt cache, so widen the margin while a
-        # large conversation is open (balance.margin_factor).
-        self._margin_factor = 1.0
-        if trigger == "balance":
-            self._update_balance_margin_factor(settings)
         decided_now = self.clock()
         ordered, any_known, active_reset_ts = _rank(
             trigger=trigger,
@@ -1637,22 +1632,23 @@ class AutoSwitchEngine:
             )
             return TickOutcome.BLOCKED
 
-        # A balance move is optional, so do not make it while Claude Code is
-        # in the middle of a reply. Switching then would send the rest of
-        # that turn's requests from an account with a cold prompt cache. The
-        # transcripts' last write time shows whether a reply is streaming.
-        # Escapes and forced moves never wait.
-        if trigger == "balance" and ordered and settings.balance_idle_seconds > 0:
-            ledger = self._token_ledger()
-            ledger.refresh()
-            quiet = ledger.seconds_since_write()
-            if quiet is not None and quiet < settings.balance_idle_seconds:
+        # A balance move is optional, and it is not free: prompt caches belong
+        # to an account, so switching discards the warm cache of every
+        # conversation used within the cache lifetime, and each one's next
+        # request writes its whole context again. Make the move only while
+        # that loss is within the budget. Moves forced by a line, the limit
+        # or a failure never wait.
+        if trigger == "balance" and ordered:
+            warm_tokens, warm_count = self._warm_context(settings)
+            if warm_tokens > settings.balance_move_budget:
                 self._emit(NoSwitchEvent(
-                    reason="busy",
+                    reason="cache-warm",
                     detail=(
-                        f"a reply is being written ({quiet:.0f}s since last log "
-                        f"write); balance move to #{ordered[0]} waits for "
-                        f"{settings.balance_idle_seconds:.0f}s quiet"
+                        f"{warm_count} conversation(s) used in the last "
+                        f"{settings.balance_warm_seconds / 60:.0f}m hold "
+                        f"{tokens.human(warm_tokens)} tokens of warm cache; "
+                        f"balance move to #{ordered[0]} waits until that is "
+                        f"<= {tokens.human(settings.balance_move_budget)}"
                     ),
                 ))
                 return TickOutcome.NO_ACTION
@@ -1921,9 +1917,6 @@ class AutoSwitchEngine:
 
     # -- balance strategy (balance.py) ---------------------------------------
 
-    # Multiplier on `balance_margin` for this tick; see balance.margin_factor.
-    _margin_factor: float = 1.0
-
     def _balance_scores(
         self, nums, usage, settings: AutoSwitchSettings, now: float
     ) -> dict[str, float]:
@@ -1938,20 +1931,11 @@ class AutoSwitchEngine:
                 scores[num] = rate.score
         return scores
 
-    def _update_balance_margin_factor(self, settings: AutoSwitchSettings) -> None:
-        """Set ``self._margin_factor`` for this tick from how big the open conversations are.
-
-        A move empties the prompt cache, so while a large conversation is
-        open, a candidate must beat the active account by a wider margin to
-        be worth that cost (balance.margin_factor).
-        """
-        self._margin_factor = 1.0
-        if settings.balance_big_context <= 0:
-            return
+    def _warm_context(self, settings: AutoSwitchSettings) -> tuple[int, int]:
+        """(tokens, conversations) of warm prompt cache a move would discard now."""
         ledger = self._token_ledger()
         ledger.refresh()
-        peak = ledger.recent_peak_context(balance.BIG_CONTEXT_LOOKBACK_S)
-        self._margin_factor = balance.margin_factor(peak, settings.balance_big_context)
+        return ledger.warm_context(settings.balance_warm_seconds)
 
     def _balance_detail(
         self, current, candidates, usage, settings, now, thresholds
@@ -1968,13 +1952,10 @@ class AutoSwitchEngine:
             over_note = f" (over {binding.label} line)" if binding is not None and binding.over else ""
             parts.append(f"#{num} {balance.fmt(scores.get(num))}{over_note}")
 
-        margin = settings.balance_margin * self._margin_factor
-        widened = (
-            f" (x{self._margin_factor:g}: large context in use)"
-            if self._margin_factor > 1
-            else ""
+        return (
+            "scores " + ", ".join(parts)
+            + f"; need +{pct_label(settings.balance_margin)}% to move"
         )
-        return "scores " + ", ".join(parts) + f"; need +{pct_label(margin)}% to move{widened}"
 
     def _no_return_account(
         self,
@@ -2549,8 +2530,9 @@ class AutoSwitchEngine:
         # (balance.py) instead of headroom. It applies to two triggers:
         #   * "balance": the active account is below its lines and the engine
         #     is only looking for a better-paced account. A candidate must
-        #     beat the active account's score by balance_margin percent (times
-        #     the large-context factor), otherwise staying put is cheaper.
+        #     beat the active account's score by balance_margin percent,
+        #     otherwise staying put is cheaper. (Whether the move is then
+        #     cheap enough on prompt cache is decided after ranking.)
         #   * "proactive": the active account crossed a line and must be left.
         #     The highest-scoring healthy account wins, with no margin.
         # The escapes (at-limit, failover) and the case where every account
@@ -2569,9 +2551,7 @@ class AutoSwitchEngine:
             # The score a candidate must reach on a "balance" nudge. None when
             # the active account has no score, and then no nudge is made.
             need = (
-                balance.required_score(
-                    active_score, settings.balance_margin, self._margin_factor
-                )
+                balance.required_score(active_score, settings.balance_margin)
                 if active_score is not None
                 else None
             )
