@@ -5601,3 +5601,119 @@ class TestDefaultLoginSignedOut:
         monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "")
 
         assert manager._default_login_signed_out() is True
+
+
+def make_leased(session_dir: Path, holder: str = "starforge", **fields) -> Path:
+    """An external lease (session.scan_leases) held by this test process."""
+    from claude_swap.process_detection import process_start_ticks
+
+    leases = session_dir / session_mod.LEASES_DIRNAME
+    leases.mkdir(parents=True, exist_ok=True)
+    record = {
+        "pid": os.getpid(),
+        "procStart": process_start_ticks(os.getpid()),
+        "holder": holder,
+        "startedAt": 1,
+        **fields,
+    }
+    path = leases / f"{holder}-{os.getpid()}.json"
+    path.write_text(json.dumps(record))
+    return path
+
+
+class TestExternalLeases:
+    """A program running sessions on a slot's login from its own config dir
+    declares it with a lease, and cswap then treats the slot as live."""
+
+    def _profile(self, switcher) -> Path:
+        session_dir = session_dir_for(switcher.backup_dir, ACCOUNT_NUM, ACCOUNT_EMAIL)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / ".credentials.json").write_text(CREDS)
+        (session_dir / ".claude.json").write_text(CONFIG)
+        return session_dir
+
+    def test_a_live_lease_reads_as_a_live_session(self, seeded_switcher):
+        session_dir = self._profile(seeded_switcher)
+        make_leased(session_dir)
+
+        sessions, unreadable = session_mod.scan_live_sessions(session_dir)
+
+        assert unreadable == 0
+        assert [(s.pid, s.kind, s.entrypoint) for s in sessions] == [
+            (os.getpid(), "lease", "starforge")
+        ]
+        assert seeded_switcher.live_session_pids_for(ACCOUNT_NUM, ACCOUNT_EMAIL) == [
+            os.getpid()
+        ]
+
+    def test_a_dead_holder_releases_the_lease(self, seeded_switcher):
+        session_dir = self._profile(seeded_switcher)
+        make_leased(session_dir, pid=2 ** 22 + 12345)  # above pid_max: never alive
+
+        assert session_mod.scan_live_sessions(session_dir) == ([], 0)
+
+    @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc start ticks")
+    def test_a_recycled_pid_does_not_keep_the_lease(self, seeded_switcher):
+        session_dir = self._profile(seeded_switcher)
+        make_leased(session_dir, procStart="1")  # some other process's start
+
+        assert session_mod.scan_live_sessions(session_dir) == ([], 0)
+
+    @pytest.mark.parametrize(
+        "body",
+        ["not json{{", json.dumps({"holder": "x"}), json.dumps({"pid": "12"}),
+         json.dumps({"pid": True}), json.dumps({"pid": 5, "holder": 7}), json.dumps([1])],
+    )
+    def test_an_unreadable_lease_counts_against_the_guards(self, seeded_switcher, body):
+        session_dir = self._profile(seeded_switcher)
+        leases = session_dir / session_mod.LEASES_DIRNAME
+        leases.mkdir()
+        (leases / "bad.json").write_text(body)
+
+        assert session_mod.scan_live_sessions(session_dir) == ([], 1)
+
+    def test_a_half_written_lease_is_not_read(self, seeded_switcher):
+        session_dir = self._profile(seeded_switcher)
+        leases = session_dir / session_mod.LEASES_DIRNAME
+        leases.mkdir()
+        (leases / "starforge-1.json.tmp").write_text("{")
+
+        assert session_mod.scan_live_sessions(session_dir) == ([], 0)
+
+    def test_a_backup_write_keeps_a_leased_profiles_credential(self, seeded_switcher):
+        """Without a lease the profile's credential is deleted (the control);
+        with one it is only marked stale, as for a live `cswap run`."""
+        session_dir = self._profile(seeded_switcher)
+        seeded_switcher._write_account_credentials(ACCOUNT_NUM, ACCOUNT_EMAIL, ROTATED_CREDS)
+        assert not (session_dir / ".credentials.json").exists()
+
+        session_dir = self._profile(seeded_switcher)
+        make_leased(session_dir)
+        seeded_switcher._write_account_credentials(ACCOUNT_NUM, ACCOUNT_EMAIL, CREDS)
+
+        assert (session_dir / ".credentials.json").read_text() == CREDS
+        assert session_mod.is_session_stale(session_dir)
+
+    def test_switching_onto_a_leased_account_is_refused(self, seeded_switcher, monkeypatch):
+        session_dir = self._profile(seeded_switcher)
+        make_leased(session_dir)
+        monkeypatch.setattr(seeded_switcher, "_get_current_account", lambda: None)
+        monkeypatch.setattr(seeded_switcher, "list_accounts", lambda **kw: None)
+
+        with pytest.raises(SwitchError, match=rf"leased by starforge \(PID {os.getpid()}\)"):
+            seeded_switcher._perform_switch(ACCOUNT_NUM)
+
+        assert seeded_switcher._get_sequence_data()["activeAccountNumber"] == 1
+        assert (session_dir / ".credentials.json").read_text() == CREDS
+
+    def test_removing_a_leased_account_is_refused(self, seeded_switcher, monkeypatch):
+        make_leased(self._profile(seeded_switcher))
+        monkeypatch.setattr("builtins.input", lambda *a: pytest.fail("no prompt"))
+
+        with pytest.raises(SessionError, match="live session-mode"):
+            seeded_switcher.remove_account(ACCOUNT_NUM)
+
+    def test_list_json_advertises_lease_support(self, seeded_switcher):
+        payload = seeded_switcher._build_list_payload([], {}, None)
+
+        assert payload["externalLeases"] == session_mod.LEASE_FORMAT_VERSION == 1

@@ -6312,6 +6312,8 @@ class ClaudeAccountSwitcher:
         plans: dict[str, dict] | None = None,
     ) -> dict:
         """Build the ``--list --json`` payload from gathered account + usage data."""
+        from claude_swap.session import LEASE_FORMAT_VERSION
+
         active_num: int | None = None
         accounts = []
         seq_data = self._get_sequence_data() or {}
@@ -6346,6 +6348,9 @@ class ClaudeAccountSwitcher:
             "schemaVersion": SCHEMA_VERSION,
             "activeAccountNumber": active_num,
             "accounts": accounts,
+            # Tells a lease holder that this cswap honours external leases
+            # (``session.scan_leases``) and which record format it reads.
+            "externalLeases": LEASE_FORMAT_VERSION,
         }
         # Additive fields (absent when clean) — never printed warnings; the
         # JSON contract keeps stdout a single machine-readable object.
@@ -7708,6 +7713,24 @@ class ClaudeAccountSwitcher:
                 self._session_dir(target_account, pre_email)
             )
             pids = [s.pid for s in sessions]
+            leases = [s for s in sessions if s.kind == "lease"]
+            if leases:
+                # An external lease (see ``session.scan_leases``) is a program
+                # running sessions on this login from its own config dir. It
+                # cannot read a warning, and making the login the default too
+                # puts one refresh token in two places, so whichever side
+                # refreshes next signs the other out. Refuse, naming it.
+                holders = ", ".join(
+                    sorted({f"{s.entrypoint} (PID {s.pid})" for s in leases})
+                )
+                raise SwitchError(
+                    f"Account-{target_account} ({pre_email}) is leased by "
+                    f"{holders}, which is running sessions on its login. "
+                    "Making it the default login as well would sign one of "
+                    "them out on the next token refresh. Stop that program "
+                    "or let it release the account, or switch to another "
+                    "account."
+                )
             if pids or unreadable:
                 if self._session_profile_ahead(target_account, pre_email, pre_org):
                     who = (

@@ -6,6 +6,7 @@
 
 - Every payload carries a `schemaVersion` (currently `1`).
 - On a handled error stdout is `{"schemaVersion":1,"error":{...}}` with a non-zero exit code.
+- `list --json` carries `externalLeases` (currently `1`): this cswap reads external lease records, in that format version. See the [README](../README.md#external-leases-programs-that-run-sessions-on-an-account).
 - `--switch`/`--switch-to` report `{"switched": true|false, "from": …, "to": …, "reason": …}`.
 
 ## Usage windows

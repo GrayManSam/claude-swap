@@ -83,7 +83,12 @@ from claude_swap.locking import FileLock
 from claude_swap.models import Platform
 from claude_swap.paths import get_default_global_config_path
 from claude_swap.printer import accent, dimmed, muted, warning
-from claude_swap.process_detection import ClaudeSession, scan_sessions
+from claude_swap.process_detection import (
+    ClaudeSession,
+    is_pid_alive,
+    process_start_ticks,
+    scan_sessions,
+)
 from claude_swap.settings import (
     atomic_write_json,
     explicit_share_history,
@@ -579,7 +584,77 @@ def scan_live_sessions(session_dir: Path) -> tuple[list[ClaudeSession], int]:
     """
     if not session_dir.exists():
         return [], 0
-    return scan_sessions(claude_dir=session_dir)
+    sessions, unreadable = scan_sessions(claude_dir=session_dir)
+    leased, bad = scan_leases(session_dir)
+    return sessions + leased, unreadable + bad
+
+
+# External leases. A program other than Claude Code that runs sessions on a
+# slot's login from a config dir of its own (the Starforge factory copies the
+# profile's credential into a sandbox and syncs refreshes back) is invisible
+# to the scan above, so cswap would treat the slot as idle: auto-switch would
+# make it the default login, a backup write would delete the profile's
+# credential, and the usage poll would adopt and refresh its token family.
+# Each of those signs the program's sessions out. A lease record declares the
+# slot owned for as long as its holder process lives, and every live-session
+# rule in cswap then applies to it unchanged.
+#
+# Contract, version 1: ``<session profile>/cswap-leases/<name>.json`` holding
+# ``{"pid": int, "procStart": str, "holder": str, "startedAt": int}``.
+# ``procStart`` is the holder's ``/proc/<pid>/stat`` start time in clock ticks
+# (Linux; optional elsewhere), so a recycled pid never keeps a lease alive.
+# The holder writes the record atomically (a temporary name that does not end
+# in ``.json``, then a rename) and deletes it on release; a crashed holder's
+# record is ignored once its pid is gone.
+LEASES_DIRNAME = "cswap-leases"
+LEASE_FORMAT_VERSION = 1
+
+
+def scan_leases(session_dir: Path) -> tuple[list[ClaudeSession], int]:
+    """Live external leases on a profile, and records that could not be read.
+
+    Same shape and the same guard rule as ``scan_sessions``: an unreadable
+    record counts, because every caller gates a step that cannot be undone.
+    A live lease reports as a session of kind ``"lease"`` whose entrypoint is
+    the holder's name.
+    """
+    leases_dir = session_dir / LEASES_DIRNAME
+    try:
+        paths = [p for p in leases_dir.iterdir() if p.match("*.json")]
+    except FileNotFoundError:
+        return [], 0
+    except OSError:
+        return [], 1
+    leases: list[ClaudeSession] = []
+    unreadable = 0
+    for path in paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            pid = data["pid"]
+            holder = data.get("holder") or "an external program"
+            stamp = data.get("procStart")
+            started = data.get("startedAt", 0)
+            if (
+                not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0
+                or not isinstance(holder, str)
+                or not (stamp is None or isinstance(stamp, str))
+                or not isinstance(started, (int, float)) or isinstance(started, bool)
+            ):
+                raise TypeError("lease record has a field of the wrong type")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            unreadable += 1
+            continue
+        if not is_pid_alive(pid):
+            continue
+        if stamp and stamp.isdigit():
+            ticks = process_start_ticks(pid)
+            if ticks is not None and ticks != stamp:
+                continue  # the holder died and its pid was reused
+        leases.append(ClaudeSession(
+            pid=pid, session_id="", cwd="", started_at=int(started),
+            kind="lease", entrypoint=holder,
+        ))
+    return leases, unreadable
 
 
 def profile_is_quiescent(session_dir: Path) -> bool:

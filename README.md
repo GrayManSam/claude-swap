@@ -169,6 +169,28 @@ Sessions use your normal `~/.claude` setup (settings, CLAUDE.md, skills, MCP ser
 </details>
 
 <details>
+<summary>External leases: programs that run sessions on an account</summary>
+
+### External leases: programs that run sessions on an account
+
+A program that runs Claude Code on an account's login from a config dir of its own (a sandboxed agent runner, for example, that copies the session profile's credential and syncs refreshes back) is invisible to cswap: it would treat the account as idle, auto-switch onto it, delete the profile's credential on a backup write, or refresh its token family during a usage poll. Any of those signs the program's sessions out. Such a program declares the account with a **lease record**, and cswap then treats the account exactly like one with a live `cswap run`:
+
+- auto-switch never picks it;
+- a backup write marks the profile stale instead of deleting its credential;
+- usage is read without refreshing or adopting its token;
+- `cswap switch` onto it, `remove`, `move` and `swap` are refused, and the refusal names the holder.
+
+Format 1: a file `~/.local/share/claude-swap/sessions/<n>-<email-slug>/cswap-leases/<name>.json` containing
+
+```json
+{"pid": 12345, "procStart": "8812345", "holder": "my-runner", "startedAt": 1764331200000}
+```
+
+`pid` is the holder process. `procStart` is that process's start time in clock ticks, as read from field 22 of `/proc/<pid>/stat` (Linux; optional elsewhere), so a reused pid does not keep the lease alive. Write the file under a name that does not end in `.json` and rename it into place; delete it on release. A crashed holder's record is ignored once its pid is gone. An unreadable record counts as held, the same as an unreadable session record. `cswap list --json` reports `"externalLeases": 1` when this cswap reads leases.
+
+</details>
+
+<details>
 <summary>Map accounts to directories — auto-pick per repo</summary>
 
 Bind a directory to an account, and a bare `cswap run` there launches that account in session mode — e.g. work account in work repos, personal elsewhere:
